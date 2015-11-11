@@ -38,8 +38,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	mapFile, _ := Conf.GetValue("Default", "Map File")
-	mapBase, err := readJSONmap(mapFile)
+	//mapFile, _ := Conf.GetValue("Default", "Map File")
+	//mapBase, err := readJSONmap(mapFile)
 	if err != nil {
 		CLog.PrintLog(true, err)
 		os.Exit(1)
@@ -50,9 +50,9 @@ func main() {
 	t0 := time.Now()
 
 	for i := 1; i <= vNumCPU; i++ {
-		go analizeFile(chFileNames, db, mapBase)
+		go analizeFile(chFileNames, db)
 	}
-	getFTPFiles(chFileNames)
+	getFTPFiles(chFileNames, db)
 
 	t1 := time.Now()
 	PrintDeb("The call took %v to run.\n", t1.Sub(t0))
@@ -63,7 +63,7 @@ func main() {
 	defer filog.Close()
 }
 
-func analizeFile(ch chan string, db *sql.DB, mapStruct []Mapping) {
+func analizeFile(ch chan string, db *sql.DB) {
 
 	for fn := range ch {
 		records, err := parceFile(fn)
@@ -76,7 +76,7 @@ func analizeFile(ch chan string, db *sql.DB, mapStruct []Mapping) {
 		} else if records[0][0] != "FileType" {
 			CLog.PrintLog(true, "The file ", fn, " has wrong format.")
 		} else {
-			fillDataBase(records, db, mapStruct)
+			fillDataBase(records, fn, db)
 		}
 		wgFTP.Done()
 	}

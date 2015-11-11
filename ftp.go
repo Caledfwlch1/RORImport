@@ -7,6 +7,10 @@ import (
 	"io"
 	"os"
 	"time"
+	"database/sql"
+	//"errors"
+	//"strings"
+	"fmt"
 )
 
 type FTPConn struct {
@@ -63,8 +67,10 @@ func (v *FTPConn) FTPFile(filename *ftp.Entry) (good bool, errOut error) {
 	return true, errOut
 }
 
-func getFTPFiles(chFileNames chan string) {
+func getFTPFiles(chFileNames chan string, db *sql.DB) {
 	var vFTPConn FTPConn
+	//var queryStr string
+	var id int
 	if err := os.Chdir("_temp_"); err != nil {
 		if err := os.Mkdir("_temp_", os.ModeDir); err != nil {
 			CLog.PrintLog(true, "Error create directory: '_temp_'. ", err)
@@ -104,8 +110,19 @@ func getFTPFiles(chFileNames chan string) {
 		CLog.PrintLog(true, "Can't get list of files from: "+ftpHostPort+"/"+dirname+" . ", err)
 		os.Exit(1)
 	}
-
+	
+	dealerId := make(map[string]int)
+	
 	for _, fi := range list {
+		id, err = findDealerID(dealerId, fi.Name[:7], db)
+		if err != nil {
+			CLog.PrintLog(true, "Error search dealer_id in dealers. ", err)
+			continue
+		}
+		if err := insertS3fileToDB(fi.Name, id, fi.Size, db); err != nil {
+			CLog.PrintLog(true, "Error insert to s3files. ", err)
+			continue
+		}
 		var good bool
 		good, err = vFTPConn.FTPFile(fi)
 		if good {
@@ -116,6 +133,23 @@ func getFTPFiles(chFileNames chan string) {
 	wgFTP.Wait()
 	vFTPConn.Quit()
 	close(chFileNames)
-
 	return
+}
+
+func insertS3fileToDB(name string, dealer_id int, size uint64, db *sql.DB) (err error) {
+	var status string
+	
+	queryStr:= "SELECT status FROM s3files WHERE name='" + name + "';"
+	
+	err = db.QueryRow(queryStr).Scan(&status)
+	if err == sql.ErrNoRows {
+		queryStr = "INSERT INTO s3files (name, size, status, dealer_id) VALUES ('" + name + "', " + fmt.Sprint(size) + ", 'registered', " + fmt.Sprint(dealer_id) + ");"
+		
+		_, err = db.Exec(queryStr)
+		return err
+	}
+	//if status != "moved" && status != "registered" {
+	//	return errors.New("The file " + name + " is registered and status '" + status + "'.")
+	//}
+	return err
 }

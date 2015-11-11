@@ -3,183 +3,298 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
+	//"encoding/json"
 	_ "github.com/lib/pq"
-	"os"
+	//"os"
 	"strings"
 	"fmt"
+	"time"
 )
 
-type Field struct{
-	Name string
-	Type string `json:",omitempty"`
-}
 
-type Mapping struct {
-	Src, Dst string
-	Mapped   int
-	Missed   int
-	Fields   map[string]Field
-	Left     []Field
-}
-
-// More compact JSON serialization - can be commented
-
-var (
-	_ json.Marshaler = (*Field)(nil)
-	_ json.Unmarshaler = (*Field)(nil)
-)
-func (f Field) MarshalJSON() ([]byte, error) {
-	return json.Marshal([2]string{f.Name,f.Type})
-}
-func (f *Field) UnmarshalJSON(data []byte) error {
-	var arr [2]string
-	if err := json.Unmarshal(data, &arr); err != nil {
-		return err
-	}
-	f.Name = arr[0]
-	f.Type = arr[1]
-	return nil
-}
-
-func fillDataBase(rec [][]string, db *sql.DB, mapStruct []Mapping) {
-	var cond string
-	//var res sql.Result
-	dealerId := make(map[string]int)
-	
-	fieldsMap := map[string]string{"SV_APPT":"SA", "SV":"SV", "SL":"SL"} 
-
+func fillDataBase(rec [][]string, fn string, db *sql.DB) {
+	var rowsProcessed, rowsNew int
+	s3FileID := make(map[string]int)
+	mapDealerID  := make(map[string]int)
 	l := len(rec)
+	/*
+	n, err := s3FileNumRows(s3FileID, fn, db)
+	if err != nil {
+		CLog.PrintLog(true, "Error search the s3file_id in s3files. ", err)
+		return
+	}
+	
+	if n == l-1 {
+		CLog.PrintLog(true, "The file "+fn+" has been processed. ")
+		return
+	}
+	*/
+	if status, err := s3FileStatus(s3FileID, fn, db); status != "registered" { 
+		CLog.PrintLog(true, "The file status "+fn+" is '" + status + "'. The error is ", err)
+		// return  // !!!!!!!! must be !!!!!!!!!
+	}
 
+	if err := s3FileStatusUpdate(s3FileID, fn, "processing", "started_at", timeNow(), 0, 0, db); err != nil {
+		CLog.PrintLog(true, "Error update the s3files to status 'processing' of file " + fn + ". ", err)
+		return
+	}
+	
 	for i := 1; i < l; i++ {
 		mapRow := make(map[string]string)
+		toDB := make(map[string][]string)
 		lrec := len(rec[i])
 		if lrec == 0 {
 			continue
 		}
-		mapRow["FileType"] = rec[i][0]
-
-		for j := 1; j < lrec; j++ {
+		for j := range rec[i] {
 			mapRow[rec[0][j]] = rec[i][j]
 		}
-		for _, el := range mapStruct {
-			if el.Src == fieldsMap[mapRow["FileType"]] {
-				//PrintDeb(el)
-				id, _ := searchID(dealerId, mapRow["ACDealerID"], db)
-				el.Fields["dealer_id"] = Field{Name:"dealer_id", Type:"integer"}
-				mapRow["dealer_id"] = fmt.Sprint(id)
-				//addToCustomers(el, mapRow, id)
-				
-				switch mapRow["FileType"] {
-					case "SV":
-						cond = fmt.Sprintf("dealer_id=%d and ronumber='%s'", id, mapRow["RONumber"])
-						
-					case "SA":
-						dateTime := mapRow["AppointmentDate"] + " " + mapRow["AppointmentTime"]
-						cond = fmt.Sprintf("dealer_id=%d and vin='%s' and appointment_datetime='%s'", id,
-											mapRow["VehicleVIN"], dateTime)
-						el.Fields["vin"] = Field{Name:"vin", Type:"character_varying(255)"}
-						mapRow["vin"] = mapRow["VehicleVIN"]
-						el.Fields["appointment_datetime"] = Field{Name:"appointment_datetime", Type:"timestamp_without_time_zone"}
-						mapRow["appointment_datetime"] = dateTime
-					case "SL":
-						cond = fmt.Sprintf("dealer_id=%d and dealnumber='%s'", id, mapRow["DealNumber"])
-						el.Fields["DealNumber"] = Field{Name:"DealNumber", Type:"character_varying(255)"}
-					default:
-						cond = ""
-				}
-				PrintDeb(cond)
-				if cond == "" {
-					continue
-				}
-				PrintDeb("\n", el, "\n", mapRow)
-				//PrintDeb(queryStr)
-				if ok, err := existRow(el.Dst, cond, db); ok {
-					queryStr := makeUpdateQuery(el, mapRow, cond)
-					_, err := db.Exec(queryStr) //res
-					if err != nil {
-						CLog.PrintLog(true, "Error execute UPDATE in ", el.Dst, ". ", err)
-						continue
-					}
-				} else if err != nil {
-					CLog.PrintLog(true, "Error execute SELECT FROM", el.Dst, ". ", err)
-					continue
-				} else {
-					queryStr := makeInsertQuery(el, mapRow)
-					PrintDeb(queryStr)
-					_, err := db.Exec(queryStr)
-					if err != nil {
-						CLog.PrintLog(true, queryStr + "\n", "Error execute INSERT INTO ", el.Dst, ". ", err)
-					}
-				}
-
-
-				
+		
+		dealer_id, err := findDealerID(mapDealerID, mapRow["ACDealerID"], db)
+		if err != nil {
+			CLog.PrintLog(true, "Error search the dealer_id in s3files. ", err)
+			return
+		}
+		
+		toDB["first_name"] = []string{mapRow["CustomerFirstName"], "character_varying(255)"}
+		toDB["last_name"] = []string{mapRow["CustomerLastName"], "character_varying(255)"}
+		if toDB["first_name"][0] == "" && toDB["last_name"][0] == "" {
+			name := strings.Split(mapRow["CustomerName"], ",")
+			switch len(name) {
+				case 1:
+					toDB["first_name"] = []string{"", "character_varying(255)"}
+					toDB["last_name"] = []string{name[0], "character_varying(255)"}
+				case 0:
+					toDB["first_name"] = []string{"", "character_varying(255)"}
+					toDB["last_name"] = []string{fmt.Sprint(name), "character_varying(255)"}
+				default:
+					toDB["first_name"] = []string{name[1], "character_varying(255)"}
+					toDB["last_name"] = []string{name[0], "character_varying(255)"}
 			}
+			
+		}
+		first_name := toDB["first_name"]
+		last_name  := toDB["last_name"]
+		
+		toDB["home_phone"] 		= []string{mapRow["CustomerHomePhone"], "character_varying(255)"}
+		toDB["work_phone"] 		= []string{mapRow["CustomerWorkPhone"], "character_varying(255)"}
+		toDB["home_phone"] 		= []string{mapRow["CustomerHomePhone"], "character_varying(255)"}
+		toDB["cell_phone"] 		= []string{mapRow["CustomerWorkPhone"], "character_varying(255)"}
+		toDB["email_address_1"] = []string{mapRow["CustomerEmailAddress"], "character_varying(255)"}
+		toDB["address_1"] 		= []string{mapRow["CustomerAddress"], "character_varying(255)"}
+		toDB["city_region"] 	= []string{mapRow["CustomerCity"], "character_varying(255)"}
+		toDB["state_province"] 	= []string{mapRow["CustomerState"], "character_varying(255)"}
+		toDB["postal_code"] 	= []string{mapRow["CustomerZip"], "character_varying(255)"}
+		toDB["dealer_id"] 		= []string{fmt.Sprint(dealer_id), "integer"}
+		
+		cust_id, err := customerFind(toDB, db)
+		if err != nil {
+			CLog.PrintLog(true, "Error SELECT/INSERT from/to customers. ", err)
+			continue
+		}
+		toDB 				= make(map[string][]string)
+		toDB["first_name"] 	= first_name
+		toDB["last_name"]  	= last_name
+		toDB["customer_id"]	= []string{fmt.Sprint(cust_id), "integer"}
+			
+		veh_id, err := vehicleFindID(mapRow["VehicleVIN"], db)
+		if err != nil {
+			CLog.PrintLog(true, "Error SELECT/INSERT from/to vehicles. ", err)
+			continue
+		}
+		cust_veh_id, err := custVehFindID(cust_id, veh_id, db)
+		if err != nil {
+			CLog.PrintLog(true, "Error SELECT/INSERT from/to vehicles. ", err)
+			continue
+		}
+		
+		toDB["customer_vehicle_id"] 	= []string{fmt.Sprint(cust_veh_id), "integer"}
+		toDB["s3file_id"] 				= []string{fmt.Sprint(s3FileID[fn]), "integer"}
+		
+		var ok bool
+		switch mapRow["FileType"] {
+			case "SV_APPT":
+				ok, err = appointUpdate(dealer_id, toDB, mapRow, db)
+			case "SV":
+				ok, err = servicesUpdate(dealer_id, toDB, mapRow, db)
+			case "SL":
+				ok, err = salesUpdate(dealer_id, toDB, mapRow, db)
+		}
+		
+		if err == nil{
+			if ok {
+				rowsNew++
+			}
+			rowsProcessed++
+		}
+		
+		if err := s3FileStatusUpdate(s3FileID, fn, "moved", "finished_at", timeNow(), rowsNew, rowsProcessed , db); err != nil {
+			CLog.PrintLog(true, "Error update the s3files to status 'moved' of file " + fn + ". ", err)
+			return
 		}
 	}
 	return
 }
 
+func custVehFindID(cust_id, veh_id int, db *sql.DB) (cust_veh_id int, err error) {
+	qs := "SELECT id FROM customers_vehicles WHERE customer_id=" + fmt.Sprint(cust_id) + " and " + "vehicle_id=" + fmt.Sprint(veh_id) + ";"
+	
+	err = db.QueryRow(qs).Scan(&cust_veh_id)
+	if err == sql.ErrNoRows {
+		qs := "INSERT INTO customers_vehicles (customer_id, vehicle_id) VALUES (" + fmt.Sprint(cust_id) + ", " + fmt.Sprint(veh_id) + ");"
+		
+		_, err := db.Exec(qs)
+		if err != nil {
+			CLog.PrintLog(true, "Error INSERT to customers_vehicles. ", err)
+			return cust_veh_id, err
+		}
+	} else {
+		return cust_veh_id, err
+	}
+	err = db.QueryRow(qs).Scan(&cust_veh_id)
+	return cust_veh_id, err
+}
+
+func vehicleFindID(vin string, db *sql.DB) (vehicle_id int, err error) {
+	qs := "SELECT id FROM vehicles WHERE vin='" + vin + "';"
+	err = db.QueryRow(qs).Scan(&vehicle_id)
+	
+	if err == sql.ErrNoRows {
+		//PrintDeb(qs)
+		//PrintDeb(vehicle_id)
+		qs := "INSERT INTO vehicles (vin) VALUES ('" + vin + "');"
+		//PrintDeb(qs)
+		_, err := db.Exec(qs)
+		if err != nil {
+			CLog.PrintLog(true, "Error INSERT to vehicles. ", err)
+			return vehicle_id, err
+		}
+	} else {
+		return vehicle_id, err
+	}
+	err = db.QueryRow(qs).Scan(&vehicle_id)
+	return vehicle_id, err
+}
+
+func customerFind(toDB map[string][]string, db *sql.DB) (id int, err error) {
+	//PrintDeb(toDB)
+	qs := "SELECT id FROM customers WHERE "
+	for i, j := range toDB {
+		if strings.TrimSpace(j[0]) == "" {
+			continue
+		}
+		qs += i + "=" + normalizeValue(j[0], j[1]) + " and "
+	}
+	qs = qs[:len(qs)-4] + ";"
+	//PrintDeb(qs)
+	err = db.QueryRow(qs).Scan(&id)
+	if err == sql.ErrNoRows {
+		addqs := ") VALUES ("
+		qs := "INSERT INTO customers ("
+		for i, j := range toDB {
+			if strings.TrimSpace(j[0]) == "" {
+				continue
+			}
+			qs += i + ","
+			addqs += normalizeValue(j[0], j[1]) + ","
+		}
+		qs = qs[:len(qs)-1] + addqs
+		qs = qs[:len(qs)-1] + ");"
+		//PrintDeb(qs)
+		_, err := db.Exec(qs)
+		if err != nil {
+			return id, err
+		}
+	} else {
+		return id, err
+	}
+	//PrintDeb(qs)
+	err = db.QueryRow(qs).Scan(&id)
+	return id, err
+}
+
+func s3FileNumRows(s3FileID map[string]int, fn string, db *sql.DB) (num int, err error) {
+
+	if id, ok := s3FileID[fn]; ok {
+		qs := "SELECT total_rows FROM s3files WHERE id=" + fmt.Sprint(id) + ";"
+		err = db.QueryRow(qs).Scan(&num)
+	} else {
+		qs := "SELECT total_rows, id FROM s3files WHERE name='" + fn + "';"
+		err = db.QueryRow(qs).Scan(&num, &id)
+		s3FileID[fn] = id
+	}
+	return num, err
+}
+
+func s3FileStatus(s3FileID map[string]int, fn string, db *sql.DB) (status string, err error) {
+
+	if id, ok := s3FileID[fn]; ok {
+		qs := "SELECT status FROM s3files WHERE id=" + fmt.Sprint(id) + ";"
+		err = db.QueryRow(qs).Scan(&status)
+	} else {
+		qs := "SELECT status, id FROM s3files WHERE name='" + fn + "';"
+		err = db.QueryRow(qs).Scan(&status, &id)
+		s3FileID[fn] = id
+	}
+	return status, err
+}
+
+func s3FileStatusUpdate(s3FileID map[string]int, fn, status, fieldname, fieldset string, rowsNew, rowsProcessed int, db *sql.DB) (err error) {
+
+	var addset, cond string
+	if fieldset != "" {
+		addset = ", " + fieldname + "='" + fieldset + "'"
+	}
+	if rowsProcessed > 0 {
+		addset += fmt.Sprintf(", new_rows=%d, total_rows=%d", rowsNew, rowsProcessed)
+	}
+	if id, ok := s3FileID[fn]; ok {
+		cond = "id=" + fmt.Sprint(id)
+	} else {
+		cond = "name='" + fn + "'"
+	}
+	qs := "UPDATE s3files SET status='" + status + "'" + addset + " WHERE " + cond + ";"
+	
+	_, err = db.Exec(qs)
+	return err
+}
+/*
+func findDealerID(mapDealerID map[string]int, acDealerID string, db *sql.DB) (id int, err error) {
+
+	if id, ok := mapDealerID[acDealerID]; ok {
+		return id, err
+	} else {
+		qs := "SELECT id FROM dealers WHERE dealer_focus_id='" + acDealerID + "';"
+		err = db.QueryRow(qs).Scan(&id)
+		mapDealerID[acDealerID] = id
+	}
+	return id, err
+}
+*/
 func existRow(dbName, cond string, db *sql.DB) (ok bool, err error) {
-	PrintDeb(dbName, cond)
-	row, err := db.Exec("SELECT id FROM " + dbName + " WHERE " + cond + ";")
+	row, err := db.Exec("SELECT id FROM " + dbName + "WHERE " + cond + ";")
 	if r, err := row.RowsAffected(); r > 0 {
 		return true, err
 	}
 	return false, err
 }
-/*
-func addToCustomers(el Mapping, mapRow map[string]string, id int, db *sql.DB) {
-	
-	if ok, err := existRow("customres", fmt.Sprintf("dealer_id=%d", id), db); ok {
-		
-	}
-	el.Fields["dealer_id"] = Field{Name:"dealer_id", Type:"integer"}
-	mapRow["dealer_id"] = fmt.Sprint(id)
-	
-	//el.Fields["first_name"] = Field{Name:"customerfirstname", Type:"character_varying(255)"}
-	//mapRow["first_name"] = mapRow["CustomerFirstName"]
-	
-	//el.Fields["last_name"] = Field{Name:"customerlastname", Type:"character_varying(255)"}
-	//mapRow["last_name"] = mapRow["CustomerLastName"]
-	
-	//el.Fields["address_1"] = Field{Name:"customeraddress", Type:"character_varying(255)"}
-	//mapRow["address_1"] = mapRow["CustomerAddress"]
-	
-	//el.Fields["city_region"] = Field{Name:"customercity", Type:"character_varying(255)"}
-	//mapRow["city_region"] = mapRow["CustomerCity"]
-	
-	//el.Fields["state_province"] = Field{Name:"customerstate", Type:"character_varying(255)"}
-	//mapRow["state_province"] = mapRow["CustomerState"]
-	
-	//el.Fields["postal_code"] = Field{Name:"customerzip", Type:"character_varying(255)"}
-	//mapRow["postal_code"] = mapRow["CustomerZip"]
-	
-	//el.Fields["home_phone"] = Field{Name:"customerhomephone", Type:"character_varying(255)"}
-	//mapRow["home_phone"] = mapRow["CustomerHomePhone"]
-	
-	//el.Fields["work_phone"] = Field{Name:"customerworkphone", Type:"character_varying(255)"}
-	//mapRow["work_phone"] = mapRow["CustomerWorkPhone"]
-	
-	//el.Fields["cell_phone"] = Field{Name:"customercellphone", Type:"character_varying(255)"}
-	//mapRow["cell_phone"] = mapRow["CustomerCellPhone"]
-	
-	//el.Fields["email_address_1"] = Field{Name:"customeremail", Type:"character_varying(255)"}
-	//mapRow["email_address_1"] = mapRow["CustomerEmail"]
+
+func timeNow() (ts string) {
+	t := time.Now()
+	ts = fmt.Sprintf("%02d/%02d/%d %02d:%02d:%02d\n", t.Month(), t.Day(), t.Year(), t.Hour(), t.Minute(), t.Second())
+	return ts
 }
-*/
-func searchID(dealerId map[string]int, searchStr string, db *sql.DB) (id int, err error) {
-	PrintDeb(dealerId, searchStr)
+
+
+func findDealerID(dealerId map[string]int, searchStr string, db *sql.DB) (id int, err error) {
+	//PrintDeb(dealerId, searchStr)
 	if id, ok := dealerId[searchStr]; ok {
 		return id, err
 	}
 	queryStr:= "SELECT id FROM dealers WHERE dealer_focus_id='" + searchStr + "';"
-	PrintDeb(queryStr)
 	err = db.QueryRow(queryStr).Scan(&id)
-	PrintDeb(id)
 	if err == sql.ErrNoRows {
-		queryStrNew:= "INSERT INTO dealers (dealer_focus_id) VALUES ('" + searchStr + "');"
+		queryStrNew:= "INSERT INTO dealers (dealer_focus_id, created_at) VALUES ('" + searchStr + "','" + timeNow() + "');"
 		
 		if _, err := db.Exec(queryStrNew); err != nil {
 			CLog.PrintLog(true, "Error INSERT INTO dealers. ", queryStrNew, " ", err)
@@ -187,54 +302,9 @@ func searchID(dealerId map[string]int, searchStr string, db *sql.DB) (id int, er
 		}
 		_ = db.QueryRow(queryStr).Scan(&id)
 	}
-	//defer rows.Close()
 	dealerId[searchStr] = id
-	PrintDeb(dealerId)
+
 	return id, err
-}
-
-func makeUpdateQuery(el Mapping, val map[string]string, cond string) string {
-	var timeStamp string
-	if el.Src == "SV" {
-		timeStamp = val["PromiseDate"] + " " + val["PromiseTime"]
-		val["PromiseTime"] = timeStamp
-	}
-	
-	queryStr := "UPDATE " + el.Dst + " set "
-	for fieldFile, fieldDB := range el.Fields {
-		queryStr += fieldDB.Name + "=" + normalizeValue(val[fieldFile], fieldDB.Type) + ","
-	}
-	if cond == "" {
-		queryStr = queryStr[:len(queryStr)-1] + ";"
-	} else {
-		queryStr = queryStr[:len(queryStr)-1] + " WHERE "
-		queryStr += cond + ";"
-	}
-	return queryStr
-}
-
-func makeInsertQuery(el Mapping, val map[string]string) string {
-	queryStr := "INSERT INTO " + el.Dst + " ("
-	addQueryStr := ") VALUES ("
-	for fieldFile, fieldDB := range el.Fields { // fieldFile
-		queryStr += fieldDB.Name + ","
-		addQueryStr += normalizeValue(val[fieldFile], fieldDB.Type) + ","
-	}
-	addQueryStr = addQueryStr[:len(addQueryStr)-1] + ");"
-	queryStr = queryStr[:len(queryStr)-1] + addQueryStr
-	return queryStr
-}
-
-func readJSONmap(name string) (mapStruct []Mapping, err error) {
-	reader, err := os.Open(name)
-	if err != nil {
-		CLog.PrintLog(true, "Error reading file: "+name)
-		PrintDeb("Error reading file: " + name)
-		return nil, err
-	}
-	err = json.NewDecoder(reader).Decode(&mapStruct)
-	defer reader.Close()
-	return mapStruct, nil
 }
 
 func openDB() (db *sql.DB, err error) {
@@ -258,6 +328,7 @@ func openDB() (db *sql.DB, err error) {
 }
 
 func normalizeValue(v, t string) (ret string) {
+	//var validMiles = regexp.MustCompile("^[[:digit:]]+")
 	quote := map[string]string{"character_varying":"'", "text":"'", "double_precision":"'", "timestamp_without_time_zone":"'",
 								"integer":"'", "serial":"", "character_varying(255)":"'", "numeric":"", "time":"'"}
 	switch {
@@ -265,18 +336,13 @@ func normalizeValue(v, t string) (ret string) {
 			if strings.TrimSpace(v) == "" {
 				ret = "0"
 			} else {
-				i := strings.Index(v,"|")
-				if i > 0 {
-					ret = quote[t] + v[:i] + quote[t]
-				} else {
-					ret = quote[t] + v + quote[t]
-				}
+				ret = quote[t] + numericValue(v) + quote[t]
 			}
 		case t == "timestamp_without_time_zone":
 			if strings.TrimSpace(v) == "" {
 				ret = "'01/01/1900'"
 			} else {
-				ret = quote[t] + v + quote[t]
+				ret = quote[t] + strings.Replace(v, ".", "/", -1) + quote[t]
 			}
 		case t == "time":
 			if strings.TrimSpace(v) == "" {
@@ -288,14 +354,29 @@ func normalizeValue(v, t string) (ret string) {
 			if strings.TrimSpace(v) == "" {
 				ret = "0"
 			} else {
-				ret = v
+				ret = numericValue(v)
 			}
+		case (t == "character_varying" || t == "character_varying(255)" || t == "text") && strings.TrimSpace(v) == "":
+			ret = ""
 		case strings.Contains(v, "'"):
 			ret = strings.Replace(v, "'", "''", -1)
-			ret = "'" + v + "'"
+			ret = "'" + ret + "'"
 		default:
 			ret = quote[t] + v + quote[t]
 	}
+	//PrintDeb(ret)
 	return ret
 }
 
+func numericValue(v string) (ret string) {
+	i := strings.Index(v,"|")
+	if i >= 0 {
+		ret = v[:i]
+	} else {
+		ret = v
+	}
+	if strings.TrimSpace(ret) == "" {
+		ret = "0"
+	}
+	return ret
+}
