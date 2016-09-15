@@ -1,4 +1,3 @@
-// sales
 package main
 
 import (
