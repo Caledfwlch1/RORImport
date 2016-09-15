@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 	"database/sql"
-	//"errors"
+	"errors"
 	//"strings"
 	"fmt"
 )
@@ -67,7 +67,7 @@ func (v *FTPConn) FTPFile(filename *ftp.Entry) (good bool, errOut error) {
 	return true, errOut
 }
 
-func getFTPFiles(chFileNames chan string, db *sql.DB) {
+func getFTPFiles(dealerID sharedMap, chFileNames chan string, db *sql.DB) {
 	var vFTPConn FTPConn
 	//var queryStr string
 	var id int
@@ -111,16 +111,16 @@ func getFTPFiles(chFileNames chan string, db *sql.DB) {
 		os.Exit(1)
 	}
 	
-	dealerId := make(map[string]int)
+	//dealerId := make(map[string]int)
 	
 	for _, fi := range list {
-		id, err = findDealerID(dealerId, fi.Name[:7], db)
+		id, err = findDealerID(dealerID, fi.Name[:7], db)
 		if err != nil {
 			CLog.PrintLog(true, "Error search dealer_id in dealers. ", err)
 			continue
 		}
 		if err := insertS3fileToDB(fi.Name, id, fi.Size, db); err != nil {
-			CLog.PrintLog(true, "Error insert to s3files. ", err)
+			CLog.PrintLog(true, "Error insert to the s3files. ", err)
 			continue
 		}
 		var good bool
@@ -140,16 +140,14 @@ func insertS3fileToDB(name string, dealer_id int, size uint64, db *sql.DB) (err 
 	var status string
 	
 	queryStr:= "SELECT status FROM s3files WHERE name='" + name + "';"
-	
 	err = db.QueryRow(queryStr).Scan(&status)
 	if err == sql.ErrNoRows {
 		queryStr = "INSERT INTO s3files (name, size, status, dealer_id) VALUES ('" + name + "', " + fmt.Sprint(size) + ", 'registered', " + fmt.Sprint(dealer_id) + ");"
-		
 		_, err = db.Exec(queryStr)
 		return err
 	}
-	//if status != "moved" && status != "registered" {
-	//	return errors.New("The file " + name + " is registered and status '" + status + "'.")
-	//}
+	if status == "moved" || status == "registered" || status == "hold" {
+		return errors.New("The file " + name + " is registered and status '" + status + "'.")
+	}
 	return err
 }

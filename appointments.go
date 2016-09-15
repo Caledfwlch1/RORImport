@@ -44,35 +44,47 @@ func procDB(nameDB, cond string, toDB map[string][]string, db *sql.DB) (bool, er
 	}
 	addqs = addqs[:len(addqs)-1] + " WHERE " + cond + ";"
 	qs := "UPDATE " + nameDB + " " + addqs
-
-	row, err := db.Exec(qs)
+	if row, err := db.Exec(qs); err != nil {
+		PrintDeb(qs)
+		CLog.PrintLog(true, "Error UPDATE of " + nameDB + ". ", err)
+		return false, err
+	} else {
+		if r, err := row.RowsAffected(); r > 0 {
+			return false, err
+		}
+	}
+	//PrintDeb(err, qs)
+/*
 	if err != nil {
 		PrintDeb(qs)
 		CLog.PrintLog(true, "Error UPDATE of " + nameDB + ". ", err)
 		return false, err
 	}
-	if r, err := row.RowsAffected(); r > 0 {
-		return true, err
-	}
+*/
+	//PrintDeb(err)
 	// insert
-	qs = "INSERT INTO " + nameDB + " ("
-	addqs = ") VALUES ("
+	qsi := "INSERT INTO " + nameDB + " ("
+	addqsi := ") VALUES ("
 		
 	for i, j := range toDB { 
 		if strings.TrimSpace(j[0]) == "" {
 			continue
 		}
-		qs += i + ","
-		addqs += normalizeValue(j[0], j[1]) + ","
+		qsi += i + ","
+		addqsi += normalizeValue(j[0], j[1]) + ","
 	}
-	addqs = addqs[:len(addqs)-1] + ");"
-	qs = qs[:len(qs)-1] + addqs
-	//PrintDeb(qs)
-	_, err = db.Exec(qs)
+	addqsi = addqsi[:len(addqsi)-1] + ");"
+	qsi = qsi[:len(qsi)-1] + addqsi
+
+	_, err := db.Exec(qsi)
 	if err != nil {
-		CLog.PrintLog(true, "Error INSERT to " + nameDB + ". ", err)
+		if strings.Contains(err.Error(),"duplicate key") {
+			_, err := db.Exec(qs)
+			return false, err
+		}
+		CLog.PrintLog(true, "Error INSERT to " + nameDB + ". ", err, "\n", qs, "\n", qsi)
 		return false, err
 	} 
-	return false, err
+	return true, err
 
 }

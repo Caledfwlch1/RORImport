@@ -12,10 +12,11 @@ import (
 )
 
 
-func fillDataBase(rec [][]string, fn string, db *sql.DB) {
+func fillDataBase(vehicleID, custVehicleID, customerID, s3FileID, dealerID sharedMap, rec [][]string, fn string, db *sql.DB) {
 	var rowsProcessed, rowsNew int
-	s3FileID := make(map[string]int)
-	mapDealerID  := make(map[string]int)
+	PrintDeb("begin:", fn)
+	// s3FileID := make(map[string]int)
+	//mapDealerID  := make(map[string]int)
 	l := len(rec)
 	/*
 	n, err := s3FileNumRows(s3FileID, fn, db)
@@ -50,7 +51,7 @@ func fillDataBase(rec [][]string, fn string, db *sql.DB) {
 			mapRow[rec[0][j]] = rec[i][j]
 		}
 		
-		dealer_id, err := findDealerID(mapDealerID, mapRow["ACDealerID"], db)
+		dealer_id, err := findDealerID(dealerID, mapRow["ACDealerID"], db)
 		if err != nil {
 			CLog.PrintLog(true, "Error search the dealer_id in s3files. ", err)
 			return
@@ -87,7 +88,7 @@ func fillDataBase(rec [][]string, fn string, db *sql.DB) {
 		toDB["postal_code"] 	= []string{mapRow["CustomerZip"], "character_varying(255)"}
 		toDB["dealer_id"] 		= []string{fmt.Sprint(dealer_id), "integer"}
 		
-		cust_id, err := customerFind(toDB, db)
+		cust_id, err := customerFind(customerID, toDB, db)
 		if err != nil {
 			CLog.PrintLog(true, "Error SELECT/INSERT from/to customers. ", err)
 			continue
@@ -97,19 +98,20 @@ func fillDataBase(rec [][]string, fn string, db *sql.DB) {
 		toDB["last_name"]  	= last_name
 		toDB["customer_id"]	= []string{fmt.Sprint(cust_id), "integer"}
 			
-		veh_id, err := vehicleFindID(mapRow["VehicleVIN"], db)
+		veh_id, err := vehicleFindID(vehicleID, mapRow["VehicleVIN"], db)
 		if err != nil {
 			CLog.PrintLog(true, "Error SELECT/INSERT from/to vehicles. ", err)
 			continue
 		}
-		cust_veh_id, err := custVehFindID(cust_id, veh_id, db)
+		cust_veh_id, err := custVehFindID(custVehicleID, cust_id, veh_id, db)
 		if err != nil {
-			CLog.PrintLog(true, "Error SELECT/INSERT from/to vehicles. ", err)
+			CLog.PrintLog(true, "Error SELECT/INSERT from/to customers_vehicles. ", err)
 			continue
 		}
 		
 		toDB["customer_vehicle_id"] 	= []string{fmt.Sprint(cust_veh_id), "integer"}
-		toDB["s3file_id"] 				= []string{fmt.Sprint(s3FileID[fn]), "integer"}
+		name, _ := s3FileID.readMap(fn)
+		toDB["s3file_id"] 				= []string{fmt.Sprint(name), "integer"}
 		
 		var ok bool
 		switch mapRow["FileType"] {
@@ -133,50 +135,66 @@ func fillDataBase(rec [][]string, fn string, db *sql.DB) {
 			return
 		}
 	}
+	PrintDeb("end:", fn, ", new rows:", rowsNew, "total proc: ", rowsProcessed)
 	return
 }
 
-func custVehFindID(cust_id, veh_id int, db *sql.DB) (cust_veh_id int, err error) {
+func custVehFindID(custVehicleID sharedMap, cust_id, veh_id int, db *sql.DB) (cust_veh_id int, err error) {
+	findString := fmt.Sprint(cust_id + veh_id)
+	cust_veh_id, ok := custVehicleID.readMap(findString)
+	if ok {
+		return cust_veh_id, nil
+	}
 	qs := "SELECT id FROM customers_vehicles WHERE customer_id=" + fmt.Sprint(cust_id) + " and " + "vehicle_id=" + fmt.Sprint(veh_id) + ";"
-	
 	err = db.QueryRow(qs).Scan(&cust_veh_id)
-	if err == sql.ErrNoRows {
-		qs := "INSERT INTO customers_vehicles (customer_id, vehicle_id) VALUES (" + fmt.Sprint(cust_id) + ", " + fmt.Sprint(veh_id) + ");"
-		
-		_, err := db.Exec(qs)
-		if err != nil {
-			CLog.PrintLog(true, "Error INSERT to customers_vehicles. ", err)
+	if err != nil {
+		/*if err != sql.ErrNoRows {
+			CLog.PrintLog(true, "Error SELECT from customers_vehicles. ", err)
+			return cust_veh_id, err
+		} */
+		qsi := "INSERT INTO customers_vehicles (customer_id, vehicle_id) VALUES (" + fmt.Sprint(cust_id) + ", " + fmt.Sprint(veh_id) + ");"
+		_, erri := db.Exec(qsi)
+		if erri != nil && err != sql.ErrNoRows {
+			CLog.PrintLog(true, "Error INSERT to customers_vehicles. ", "\n", err, "\n", qs, "\n", erri, "\n", qsi)
 			return cust_veh_id, err
 		}
 	} else {
+		custVehicleID.writeMap(findString, cust_veh_id)
 		return cust_veh_id, err
 	}
 	err = db.QueryRow(qs).Scan(&cust_veh_id)
+	custVehicleID.writeMap(findString, cust_veh_id)
 	return cust_veh_id, err
 }
 
-func vehicleFindID(vin string, db *sql.DB) (vehicle_id int, err error) {
+func vehicleFindID(vehicleID sharedMap, vin string, db *sql.DB) (vehicle_id int, err error) {
+	vehicle_id, ok := vehicleID.readMap(vin)
+	if ok {
+		return vehicle_id, nil
+	}
 	qs := "SELECT id FROM vehicles WHERE vin='" + vin + "';"
 	err = db.QueryRow(qs).Scan(&vehicle_id)
-	
-	if err == sql.ErrNoRows {
-		//PrintDeb(qs)
-		//PrintDeb(vehicle_id)
-		qs := "INSERT INTO vehicles (vin) VALUES ('" + vin + "');"
-		//PrintDeb(qs)
-		_, err := db.Exec(qs)
-		if err != nil {
-			CLog.PrintLog(true, "Error INSERT to vehicles. ", err)
+	if err != nil {
+		/* if err != sql.ErrNoRows {
+			CLog.PrintLog(true, "Error SELECT from vehicles. ", err)
+			return vehicle_id, err
+		} */
+		qsi := "INSERT INTO vehicles (vin) VALUES ('" + vin + "');"
+		_, erri := db.Exec(qsi)
+		if erri != nil && err != sql.ErrNoRows {
+			CLog.PrintLog(true, "Error INSERT to vehicles. ", "\n", err, "\n", qs, "\n", erri, "\n", qsi)
 			return vehicle_id, err
 		}
 	} else {
+		vehicleID.writeMap(vin, vehicle_id)
 		return vehicle_id, err
 	}
 	err = db.QueryRow(qs).Scan(&vehicle_id)
+	vehicleID.writeMap(vin, vehicle_id)
 	return vehicle_id, err
 }
 
-func customerFind(toDB map[string][]string, db *sql.DB) (id int, err error) {
+func customerFind(customerID sharedMap, toDB map[string][]string, db *sql.DB) (id int, err error) {
 	//PrintDeb(toDB)
 	qs := "SELECT id FROM customers WHERE "
 	for i, j := range toDB {
@@ -186,61 +204,66 @@ func customerFind(toDB map[string][]string, db *sql.DB) (id int, err error) {
 		qs += i + "=" + normalizeValue(j[0], j[1]) + " and "
 	}
 	qs = qs[:len(qs)-4] + ";"
-	//PrintDeb(qs)
+	id, ok := customerID.readMap(qs)
+	if ok {
+		return id, nil
+	}
 	err = db.QueryRow(qs).Scan(&id)
-	if err == sql.ErrNoRows {
-		addqs := ") VALUES ("
-		qs := "INSERT INTO customers ("
+	if err != nil {
+		addqsi := ") VALUES ("
+		qsi := "INSERT INTO customers ("
 		for i, j := range toDB {
 			if strings.TrimSpace(j[0]) == "" {
 				continue
 			}
-			qs += i + ","
-			addqs += normalizeValue(j[0], j[1]) + ","
+			qsi += i + ","
+			addqsi += normalizeValue(j[0], j[1]) + ","
 		}
-		qs = qs[:len(qs)-1] + addqs
-		qs = qs[:len(qs)-1] + ");"
+		qsi = qsi[:len(qsi)-1] + addqsi
+		qsi = qsi[:len(qsi)-1] + ");"
 		//PrintDeb(qs)
-		_, err := db.Exec(qs)
-		if err != nil {
+		_, err := db.Exec(qsi)
+		if err != nil && err != sql.ErrNoRows {
+			CLog.PrintLog(true, "Error INSERT to customers. ", err, "\n", qs, "\n", qsi)
 			return id, err
 		}
 	} else {
+		customerID.writeMap(qs, id)
 		return id, err
 	}
 	//PrintDeb(qs)
 	err = db.QueryRow(qs).Scan(&id)
+	customerID.writeMap(qs, id)
 	return id, err
 }
 
-func s3FileNumRows(s3FileID map[string]int, fn string, db *sql.DB) (num int, err error) {
-
-	if id, ok := s3FileID[fn]; ok {
+func s3FileNumRows(s3FileID sharedMap, fn string, db *sql.DB) (num int, err error) {
+	id, ok := s3FileID.readMap(fn)
+	if ok {
 		qs := "SELECT total_rows FROM s3files WHERE id=" + fmt.Sprint(id) + ";"
 		err = db.QueryRow(qs).Scan(&num)
 	} else {
 		qs := "SELECT total_rows, id FROM s3files WHERE name='" + fn + "';"
 		err = db.QueryRow(qs).Scan(&num, &id)
-		s3FileID[fn] = id
+		s3FileID.writeMap(fn, id)
 	}
 	return num, err
 }
 
-func s3FileStatus(s3FileID map[string]int, fn string, db *sql.DB) (status string, err error) {
-
-	if id, ok := s3FileID[fn]; ok {
+func s3FileStatus(s3FileID sharedMap, fn string, db *sql.DB) (status string, err error) {
+	id, ok := s3FileID.readMap(fn) 
+	if ok {
 		qs := "SELECT status FROM s3files WHERE id=" + fmt.Sprint(id) + ";"
 		err = db.QueryRow(qs).Scan(&status)
 	} else {
 		qs := "SELECT status, id FROM s3files WHERE name='" + fn + "';"
 		err = db.QueryRow(qs).Scan(&status, &id)
-		s3FileID[fn] = id
+		s3FileID.writeMap(fn, id)
 	}
 	return status, err
 }
 
-func s3FileStatusUpdate(s3FileID map[string]int, fn, status, fieldname, fieldset string, rowsNew, rowsProcessed int, db *sql.DB) (err error) {
-
+func s3FileStatusUpdate(s3FileID sharedMap, fn, status, fieldname, fieldset string, rowsNew, rowsProcessed int, db *sql.DB) (err error) {
 	var addset, cond string
 	if fieldset != "" {
 		addset = ", " + fieldname + "='" + fieldset + "'"
@@ -248,29 +271,17 @@ func s3FileStatusUpdate(s3FileID map[string]int, fn, status, fieldname, fieldset
 	if rowsProcessed > 0 {
 		addset += fmt.Sprintf(", new_rows=%d, total_rows=%d", rowsNew, rowsProcessed)
 	}
-	if id, ok := s3FileID[fn]; ok {
+	id, ok := s3FileID.readMap(fn) 
+	if ok {
 		cond = "id=" + fmt.Sprint(id)
 	} else {
 		cond = "name='" + fn + "'"
 	}
 	qs := "UPDATE s3files SET status='" + status + "'" + addset + " WHERE " + cond + ";"
-	
 	_, err = db.Exec(qs)
 	return err
 }
-/*
-func findDealerID(mapDealerID map[string]int, acDealerID string, db *sql.DB) (id int, err error) {
 
-	if id, ok := mapDealerID[acDealerID]; ok {
-		return id, err
-	} else {
-		qs := "SELECT id FROM dealers WHERE dealer_focus_id='" + acDealerID + "';"
-		err = db.QueryRow(qs).Scan(&id)
-		mapDealerID[acDealerID] = id
-	}
-	return id, err
-}
-*/
 func existRow(dbName, cond string, db *sql.DB) (ok bool, err error) {
 	row, err := db.Exec("SELECT id FROM " + dbName + "WHERE " + cond + ";")
 	if r, err := row.RowsAffected(); r > 0 {
@@ -286,9 +297,9 @@ func timeNow() (ts string) {
 }
 
 
-func findDealerID(dealerId map[string]int, searchStr string, db *sql.DB) (id int, err error) {
+func findDealerID(dealerId sharedMap, searchStr string, db *sql.DB) (id int, err error) {
 	//PrintDeb(dealerId, searchStr)
-	if id, ok := dealerId[searchStr]; ok {
+	if id, ok := dealerId.readMap(searchStr); ok {
 		return id, err
 	}
 	queryStr:= "SELECT id FROM dealers WHERE dealer_focus_id='" + searchStr + "';"
@@ -302,7 +313,7 @@ func findDealerID(dealerId map[string]int, searchStr string, db *sql.DB) (id int
 		}
 		_ = db.QueryRow(queryStr).Scan(&id)
 	}
-	dealerId[searchStr] = id
+	dealerId.writeMap(searchStr, id)
 
 	return id, err
 }
@@ -380,3 +391,26 @@ func numericValue(v string) (ret string) {
 	}
 	return ret
 }
+
+// pq: duplicate key value violates unique constraint
+/*
+func printErrSQL(err sql.Error) {
+	fmt.Println("Error: Severity:", err.Severity,
+    ",\n Code:", err.Code,
+    ",\n Message:", err.Message,
+    ",\n Detail:", err.Detail,
+    ",\n Hint:", err.Hint,
+    ",\n Position:", err.Position,
+    ",\n InternalPosition:", err.InternalPosition,
+    ",\n InternalQuery:", err.InternalQuery,
+    ",\n Where:", err.Where,
+    ",\n Schema:", err.Schema,
+    ",\n Table:", err.Table,
+    ",\n Column:", err.Column,
+    ",\n DataTypeName:", err.DataTypeName,
+    ",\n Constraint:", err.Constraint,
+    ",\n File:", err.File,
+    ",\n Line:", err.Line,
+    ",\n Routine:", err.Routine)
+}
+*/

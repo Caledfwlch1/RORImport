@@ -20,10 +20,29 @@ const (
 	bufferSize = 512000
 )
 
+type sharedMap struct {
+	name	map[string]int
+	rw		*sync.RWMutex
+}
+
+func (s *sharedMap)readMap(n string) (int, bool) {
+	s.rw.RLock()
+	defer s.rw.RUnlock()
+	i, ok := s.name[n]
+	return i, ok
+}
+
+func (s *sharedMap)writeMap(n string, i int) {
+	s.rw.Lock()
+	defer s.rw.Unlock()
+	s.name[n] = i
+	return
+}
+
 var wgFile, wgFTP sync.WaitGroup
 
 func main() {
-
+	
 	filog := InitFunc()
 
 	vNumCPU, _ := Conf.Int("Default", "Quantity Proc")
@@ -48,11 +67,17 @@ func main() {
 	chFileNames := make(chan string, vNumCPU)
 
 	t0 := time.Now()
+	
+	dealerID := sharedMap{map[string]int{}, new(sync.RWMutex)}
+	s3FileID := sharedMap{map[string]int{}, new(sync.RWMutex)}
+	vehicleID := sharedMap{map[string]int{}, new(sync.RWMutex)}
+	custVehicleID := sharedMap{map[string]int{}, new(sync.RWMutex)}
+	customerID := sharedMap{map[string]int{}, new(sync.RWMutex)}
 
 	for i := 1; i <= vNumCPU; i++ {
-		go analizeFile(chFileNames, db)
+		go analizeFile(vehicleID, custVehicleID, customerID, s3FileID, dealerID, chFileNames, db)
 	}
-	getFTPFiles(chFileNames, db)
+	getFTPFiles(dealerID, chFileNames, db)
 
 	t1 := time.Now()
 	PrintDeb("The call took %v to run.\n", t1.Sub(t0))
@@ -63,7 +88,7 @@ func main() {
 	defer filog.Close()
 }
 
-func analizeFile(ch chan string, db *sql.DB) {
+func analizeFile(vehicleID, custVehicleID, customerID, s3FileID, dealerID sharedMap, ch chan string, db *sql.DB) {
 
 	for fn := range ch {
 		records, err := parceFile(fn)
@@ -76,7 +101,7 @@ func analizeFile(ch chan string, db *sql.DB) {
 		} else if records[0][0] != "FileType" {
 			CLog.PrintLog(true, "The file ", fn, " has wrong format.")
 		} else {
-			fillDataBase(records, fn, db)
+			fillDataBase(vehicleID, custVehicleID, customerID, s3FileID, dealerID, records, fn, db)
 		}
 		wgFTP.Done()
 	}
