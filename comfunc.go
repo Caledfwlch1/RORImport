@@ -84,7 +84,7 @@ func (v *CommonLog) PrintLog(console bool, s ...interface{}) {
 	var str string
 	str, _ = os.Hostname()
 	str = time.Now().String() + " ; " + str
-	str += " ; " + fmt.Sprint(s...) // + LSTR
+	str += " ; " + fmt.Sprint(s...)
 	v.Println(str)
 	if console {
 		fmt.Println(str)
